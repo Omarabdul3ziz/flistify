@@ -2,6 +2,7 @@
 
 - only FROM ubuntu archive
 - RUN can't have &&
+- RUN uses bash
 
 
 ### Future work

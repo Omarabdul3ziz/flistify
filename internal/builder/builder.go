@@ -14,15 +14,14 @@ func Build(params []string) error {
 	// TODO: allow multiple lines for the same command
 	zerofileBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("can't read Zerofile: %v", err.Error())
 	}
-
 	lines := strings.Split(string(zerofileBytes), "\n")
 
 	// TODO: pass flist name from flag or something
 	err = startRootfs(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("can't start the flist: %v", err.Error())
 	}
 
 	for _, line := range lines {
@@ -30,7 +29,7 @@ func Build(params []string) error {
 			continue
 		}
 
-		content := strings.Split(line, " ")
+		content := strings.Split(strings.TrimSpace(line), " ")
 		switch content[0] {
 		case "FROM":
 			err = handleFrom(content[1:])
