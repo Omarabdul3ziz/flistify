@@ -5,7 +5,9 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/omarabdul3ziz/flistify/internal/config"
 	"github.com/omarabdul3ziz/flistify/pkg/types"
+	"github.com/omarabdul3ziz/flistify/pkg/utils"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 )
@@ -36,7 +38,7 @@ func (bl *Builder) handleFrom(line string) error {
 	// TODO: download flist from hub
 	// TODO: load flist from cache
 	// TODO: check by hash the files not just the existence of some directories
-	if isRootFS(bl.Paths.RootFS) {
+	if utils.IsRootFS(bl.Paths.RootFS) {
 		log.Info().Msg("there is already a rootfs in this directory")
 		return nil
 	}
@@ -52,10 +54,10 @@ func (bl *Builder) handleFrom(line string) error {
 
 	cmd := types.Command{
 		Name: "debootstrap",
-		Args: []string{version, bl.Paths.RootFS, UBUNTU_ARCHIVE},
+		Args: []string{version, bl.Paths.RootFS, config.UBUNTU_ARCHIVE},
 	}
 
-	if err := executeCommand(cmd); err != nil {
+	if err := utils.ExecuteCommand(cmd); err != nil {
 		return errors.Wrapf(err, "failed executing command: %+v", cmd)
 	}
 

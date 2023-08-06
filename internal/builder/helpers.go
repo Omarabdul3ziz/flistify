@@ -7,20 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/omarabdul3ziz/flistify/internal/config"
 	"github.com/omarabdul3ziz/flistify/pkg/types"
+	"github.com/omarabdul3ziz/flistify/pkg/utils"
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog/log"
 	"golang.org/x/exp/slices"
 )
-
-func createDirectoryIfNotExist(path string) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(path, 0755); err != nil {
-			return errors.Wrapf(err, "couldn't create directory: %v", path)
-		}
-	}
-	return nil
-}
 
 func isEmptyOrComment(line string) bool {
 	line = strings.TrimSpace(line)
@@ -36,17 +28,6 @@ func parseLine(line string) (string, string, error) {
 	return content[0], content[1], nil
 }
 
-func executeCommand(cmd types.Command) error {
-	log.Info().Msgf("[+] Executing: %v %+v", cmd.Name, strings.Join(cmd.Args, " "))
-
-	// TODO: conceder CommandContext
-	command := exec.Command(cmd.Name, cmd.Args...)
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-
-	return command.Run()
-}
-
 func getBaseImageVersion(line string) (string, error) {
 	content := strings.Split(strings.TrimSpace(line), ":")
 
@@ -57,28 +38,11 @@ func getBaseImageVersion(line string) (string, error) {
 	image := content[0]
 	version := content[1]
 
-	if !slices.Contains(SUPPORTED_DISTROS, image) {
+	if !slices.Contains(config.SUPPORTED_DISTROS, image) {
 		return "", errors.Errorf("%v is an unsupported base image", image)
 	}
 
 	return version, nil
-}
-
-func isRootFS(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-
-	essentialDirsAndFiles := []string{"/bin", "/etc", "/dev", "/lib", "/usr", "/var", "/etc/passwd", "/etc/shadow", "/etc/group"}
-
-	for _, element := range essentialDirsAndFiles {
-		if _, err := os.Stat(filepath.Join(path, element)); err != nil {
-			return false
-		}
-	}
-
-	return true
 }
 
 func parseRunLine(line string) (string, []string) {
@@ -88,7 +52,7 @@ func parseRunLine(line string) (string, []string) {
 
 func runWithArchChroot(path string, cmd types.Command) error {
 	cmd.Args = append([]string{path, cmd.Name}, cmd.Args...)
-	return executeCommand(types.Command{
+	return utils.ExecuteCommand(types.Command{
 		Name: "arch-chroot",
 		Args: cmd.Args,
 	})
@@ -119,14 +83,14 @@ func updateAndClean(path string) error {
 }
 
 func editModulesFile(path string) error {
-	moduleFilePath := filepath.Join(path, INITRAMSFS_PATH)
+	moduleFilePath := filepath.Join(path, config.INITRAMSFS_PATH)
 
 	moduleFile, err := os.OpenFile(moduleFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return errors.Wrapf(err, "couldn't open module file: %v", moduleFilePath)
 	}
 
-	if _, err = moduleFile.WriteString("\n" + VIRTIOFS + "\n"); err != nil {
+	if _, err = moduleFile.WriteString("\n" + config.VIRTIOFS + "\n"); err != nil {
 		return errors.Wrapf(err, "couldn't add virtiofs")
 	}
 

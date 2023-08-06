@@ -10,6 +10,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/omarabdul3ziz/flistify/pkg/types"
+	"github.com/omarabdul3ziz/flistify/pkg/utils"
 )
 
 // Builder represents a builder object
@@ -26,7 +27,7 @@ func NewBuilder(name string) (Builder, error) {
 	bl.SetPaths()
 	bl.SetHandlers()
 
-	if err := createDirectoryIfNotExist(bl.Paths.RootFS); err != nil {
+	if err := utils.CreateDirectoryIfNotExist(bl.Paths.RootFS); err != nil {
 		return Builder{}, errors.Wrap(err, "failed to start the flist")
 	}
 

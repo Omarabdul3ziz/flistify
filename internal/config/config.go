@@ -1,4 +1,4 @@
-package builder
+package config
 
 const (
 	FLISTIFY_ROOT   = "/var/lib/flistify"
