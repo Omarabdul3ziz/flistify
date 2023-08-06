@@ -2,52 +2,78 @@ package builder
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"github.com/omarabdul3ziz/flistify/pkg/types"
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/exp/slices"
 )
 
-func isExist(path string) bool {
-	_, err := os.Stat(path)
-	return !os.IsNotExist(err)
-}
-
-func startRootfs(flistName string) error {
-	// TODO: check permission
-	if !isExist(flistName) {
-		err := os.Mkdir(flistName, 0666)
-		if err != nil {
-			return fmt.Errorf("couldn't create directory ")
+func createDirectoryIfNotExist(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return errors.Wrapf(err, "couldn't create directory: %v", path)
 		}
 	}
-
 	return nil
 }
 
-// func isRootFS(path string) bool {
-// 	if !isExist(path) {
-// 		return false
-// 	}
+func isEmptyOrComment(line string) bool {
+	line = strings.TrimSpace(line)
+	return line == "" || line[0] == '#'
+}
 
-// }
+func parseLine(line string) (string, string, error) {
+	content := strings.SplitN(strings.TrimSpace(line), " ", 2)
 
-func directoryContainsRootFS(directoryPath string) bool {
-	directoryContents, err := ioutil.ReadDir(directoryPath)
-	if err != nil {
-		fmt.Println("Error reading directory:", err)
+	if len(content) < 2 {
+		return "", "", errors.Errorf("invalid command format: %s", line)
+	}
+	return content[0], content[1], nil
+}
+
+func executeCommand(cmd types.Command) error {
+	log.Info().Msgf("[+] Executing: %v %+v", cmd.Name, strings.Join(cmd.Args, " "))
+
+	// TODO: conceder CommandContext
+	command := exec.Command(cmd.Name, cmd.Args...)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+
+	return command.Run()
+}
+
+func getBaseImageVersion(line string) (string, error) {
+	content := strings.Split(strings.TrimSpace(line), ":")
+
+	if len(content) < 2 {
+		return "", errors.Errorf("invalid base format: %s", line)
+	}
+
+	image := content[0]
+	version := content[1]
+
+	if !slices.Contains(SUPPORTED_DISTROS, image) {
+		return "", errors.Errorf("%v is an unsupported base image", image)
+	}
+
+	return version, nil
+}
+
+func isRootFS(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
 		return false
 	}
 
-	foundElements := make(map[string]bool)
-	for _, file := range directoryContents {
-		foundElements[file.Name()] = true
-	}
+	essentialDirsAndFiles := []string{"/bin", "/etc", "/dev", "/lib", "/usr", "/var", "/etc/passwd", "/etc/shadow", "/etc/group"}
 
-	for _, element := range rootfsElements {
-		if _, exists := foundElements[strings.TrimPrefix(element, "/")]; !exists {
+	for _, element := range essentialDirsAndFiles {
+		if _, err := os.Stat(filepath.Join(path, element)); err != nil {
 			return false
 		}
 	}
@@ -55,24 +81,116 @@ func directoryContainsRootFS(directoryPath string) bool {
 	return true
 }
 
-func runInside(chrootDir string, command Command) error {
+func parseRunLine(line string) (string, []string) {
+	content := strings.Split(line, " ")
+	return content[0], content[1:]
+}
+
+func runWithArchChroot(path string, cmd types.Command) error {
+	cmd.Args = append([]string{path, cmd.Name}, cmd.Args...)
+	return executeCommand(types.Command{
+		Name: "arch-chroot",
+		Args: cmd.Args,
+	})
+}
+
+func updateAndClean(path string) error {
+	cmds := []types.Command{
+		{
+			Name: "update-initramfs",
+			Args: []string{"-c", "-k", "all"},
+		},
+		{
+			Name: "apt",
+			Args: []string{"clean"},
+		},
+		{
+			Name: "cloud-init",
+			Args: []string{"clean"},
+		},
+	}
+	for idx := range cmds {
+		if err := runWithArchChroot(path, cmds[idx]); err != nil {
+			return errors.Wrapf(err, "failed running: %+v", cmds[idx])
+		}
+	}
+
+	return nil
+}
+
+func editModulesFile(path string) error {
+	moduleFilePath := filepath.Join(path, INITRAMSFS_PATH)
+
+	moduleFile, err := os.OpenFile(moduleFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return errors.Wrapf(err, "couldn't open module file: %v", moduleFilePath)
+	}
+
+	if _, err = moduleFile.WriteString("\n" + VIRTIOFS + "\n"); err != nil {
+		return errors.Wrapf(err, "couldn't add virtiofs")
+	}
+
+	return nil
+}
+
+func extractKernel(path string, kernelVersion string) error {
+	// TODO: add info logs to track progress
+	kernelName := fmt.Sprintf("vmlinuz-%v", kernelVersion)
+	vmlinuzPath := filepath.Join(path, "/boot/vmlinuz")
+
+	filename := fmt.Sprintf("%s%s", kernelName, ".elf")
+	elfFilePath := filepath.Join(path, "/boot", filename)
+
+	kerFilePath := filepath.Join(path, "/boot", kernelName)
+
+	// Run the extract-vmlinux command and redirect its output to the output file
+	extractCmd := exec.Command("/usr/bin/sudo", "extract-vmlinux", vmlinuzPath)
+
+	outputFile, err := os.Create(elfFilePath)
+	if err != nil {
+		return errors.Wrapf(err, "failed creating file: %v", elfFilePath)
+	}
+	defer outputFile.Close()
+	extractCmd.Stdout = outputFile
+
+	if err := extractCmd.Run(); err != nil {
+		return errors.Wrapf(err, "failed extracting")
+	}
+
+	// Run the "sudo tee" command to redirect the output to /dev/null
+	teeCmd := exec.Command("sudo", "tee", "/dev/null")
+	teeCmd.Stdin = outputFile
+
+	if err := teeCmd.Run(); err != nil {
+		return errors.Wrapf(err, "error running tee command")
+	}
+
+	// mvCmd to rename elf file
+	mvCmd := exec.Command("mv", elfFilePath, kerFilePath)
+	if err := mvCmd.Run(); err != nil {
+		return errors.Wrapf(err, "failed renaming the file")
+	}
+
+	return nil
+}
+
+/*
+func runInsideChrootJail(chrootDir string, command types.Command) error {
 	fmt.Printf("[+] Executing command \"%v\" with args \"%v\"\n", command.Name, command.Args)
 
 	if !isExist(chrootDir) {
 		return fmt.Errorf("chroot directory does not exist: %s", chrootDir)
 	}
 
-	exit, err := Chroot(chrootDir)
+	exit, err := chroot(chrootDir)
 	if err != nil {
 		return fmt.Errorf("can't chroot: %v", err.Error())
 	}
 
-	// do some work
 	if err := executeCommand(command); err != nil {
 		return fmt.Errorf("can't run: %v", err.Error())
 	}
 
-	// exit from the chroot
 	if err := exit(); err != nil {
 		return fmt.Errorf("can't exit: %v", err.Error())
 	}
@@ -80,33 +198,12 @@ func runInside(chrootDir string, command Command) error {
 	return nil
 }
 
-func runMultipleInside(chrootDir string, commands []Command) error {
-
-	if !isExist(chrootDir) {
-		return fmt.Errorf("chroot directory does not exist: %s", chrootDir)
-	}
-
-	exit, err := Chroot(chrootDir)
-	if err != nil {
-		return fmt.Errorf("can't chroot: %v", err.Error())
-	}
-
-	// do some work
-	for idx := range commands {
-		if err := executeCommand(commands[idx]); err != nil {
-			return fmt.Errorf("can't run: %v", err.Error())
-		}
-	}
-
-	// exit from the chroot
-	if err := exit(); err != nil {
-		return fmt.Errorf("can't exit: %v", err.Error())
-	}
-
-	return nil
+func isExist(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
 }
 
-func Chroot(path string) (func() error, error) {
+func chroot(path string) (func() error, error) {
 	root, err := os.Open("/")
 	if err != nil {
 		return nil, err
@@ -125,70 +222,4 @@ func Chroot(path string) (func() error, error) {
 		return syscall.Chroot(".")
 	}, nil
 }
-
-func executeCommand(cmd Command) error {
-	fmt.Println(cmd.Name, cmd.Args)
-	command := exec.Command(cmd.Name, cmd.Args...)
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	return command.Run()
-}
-
-func getKernelName() (string, error) {
-	// TODO: this is tmp helper, get the name from the kernel in zerofile or any other way.
-	directoryContents, err := ioutil.ReadDir(filepath.Join(path, "/boot"))
-	if err != nil {
-		return "", fmt.Errorf("error reading directory: %v", err.Error())
-	}
-
-	for _, file := range directoryContents {
-		if strings.Contains(file.Name(), "vmlinuz-") {
-			return file.Name(), nil
-		}
-	}
-
-	return "", fmt.Errorf("couldn't fine vmlinuz file")
-}
-
-func extractKernel() error {
-	kernelName, err := getKernelName()
-	if err != nil {
-		return fmt.Errorf("cound't get kernel name: %v", err.Error())
-	}
-
-	vmlinuzPath := filepath.Join(path, "/boot/vmlinuz")
-	filename := fmt.Sprintf("%s%s", kernelName, ".elf")
-	elfFilePath := filepath.Join(path, "/boot", filename)
-
-	KerFilePath := filepath.Join(path, "/boot", kernelName)
-
-	// Run the extract-vmlinux command and redirect its output to the output file
-	extractCmd := exec.Command("/usr/bin/sudo", "extract-vmlinux", vmlinuzPath)
-
-	outputFile, err := os.Create(elfFilePath)
-	if err != nil {
-		return fmt.Errorf("error creating elffile")
-	}
-	defer outputFile.Close()
-	extractCmd.Stdout = outputFile
-
-	if err := extractCmd.Run(); err != nil {
-		return fmt.Errorf("error extracting: %v", err.Error())
-	}
-
-	// Run the "sudo tee" command to redirect the output to /dev/null
-	teeCmd := exec.Command("sudo", "tee", "/dev/null")
-	teeCmd.Stdin = outputFile
-
-	if err := teeCmd.Run(); err != nil {
-		return fmt.Errorf("error running tee command: %v", err.Error())
-	}
-
-	// mvCmd to rename elf file
-	mvCmd := exec.Command("mv", elfFilePath, KerFilePath)
-	if err := mvCmd.Run(); err != nil {
-		return fmt.Errorf("couldn't move: %v", err.Error())
-	}
-
-	return nil
-}
+*/

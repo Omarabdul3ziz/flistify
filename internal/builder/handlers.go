@@ -2,114 +2,113 @@ package builder
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
+	"strings"
+
+	"github.com/omarabdul3ziz/flistify/pkg/types"
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
 )
 
-var rootfsElements = []string{
-	"/bin",
-	"/dev",
-	"/etc",
-	"/lib",
-	"/usr",
-	"/var",
+func (bl *Builder) HandleLine(line string) error {
+	if isEmptyOrComment(line) {
+		return nil
+	}
+
+	key, value, err := parseLine(line)
+	if err != nil {
+		return err
+	}
+
+	handler, ok := bl.Handlers[key]
+	if !ok {
+		return errors.Errorf("%v is unsupported types.command", key)
+	}
+
+	if err := handler(value); err != nil {
+		return errors.Wrapf(err, "failed to handle: %v", line)
+	}
+
+	return nil
 }
 
-type Command struct {
-	Name string
-	Args []string
-}
-
-func handleFrom(line []string) error {
+func (bl *Builder) handleFrom(line string) error {
 	// TODO: download flist from hub
 	// TODO: load flist from cache
-
-	var err error
-	ubuntuVersion := line[0]
-	directoryName := name
-
-	if !directoryContainsRootFS(path) {
-		cmd := exec.Command("debootstrap", ubuntuVersion, directoryName, "http://archive.ubuntu.com/ubuntu")
-		cmd.Stdout = os.Stdout
-		cmd.Stdin = os.Stdin
-		cmd.Stderr = os.Stderr
-		err = cmd.Run()
+	// TODO: check by hash the files not just the existence of some directories
+	if isRootFS(bl.Paths.RootFS) {
+		log.Info().Msg("there is already a rootfs in this directory")
+		return nil
 	}
 
-	return err
-}
-
-func handleRun(line []string) error {
-	cmd := Command{
-		Name: line[0],
-		Args: line[1:],
+	version, err := getBaseImageVersion(line)
+	if err != nil {
+		return err
 	}
 
-	if err := runInside(path, cmd); err != nil {
-		return fmt.Errorf("error handling run %+v: %+v", line, err.Error())
+	if _, err := exec.LookPath("debootstrap"); err != nil {
+		return errors.Wrapf(err, "debootstrap command not found. check scripts/prepare.sh")
+	}
+
+	cmd := types.Command{
+		Name: "debootstrap",
+		Args: []string{version, bl.Paths.RootFS, UBUNTU_ARCHIVE},
+	}
+
+	if err := executeCommand(cmd); err != nil {
+		return errors.Wrapf(err, "failed executing command: %+v", cmd)
 	}
 
 	return nil
 }
 
-func handleKernel(line []string) error {
+func (bl *Builder) handleRun(line string) error {
+	name, args := parseRunLine(line)
+
+	cmd := types.Command{
+		Name: name,
+		Args: args,
+	}
+
+	if err := runWithArchChroot(bl.Paths.RootFS, cmd); err != nil {
+		return errors.Wrapf(err, "failed to run command '%s %s': %+v", name, strings.Join(args, " "), cmd)
+	}
+
+	return nil
+}
+
+func (bl *Builder) handleKernel(line string) error {
 	// TODO: add validation on kernel version
 
-	// install kernel
-	cmd := Command{
+	cmd := types.Command{
 		Name: "apt",
-		Args: []string{"install", "-y", line[0]},
+		Args: []string{"install", "-y", fmt.Sprintf("linux-modules-extra-%v", line)},
 	}
-	if err := runInside(path, cmd); err != nil {
-		return fmt.Errorf("error handling run %+v: %+v", line, err.Error())
-	}
-
-	// update-initramfs
-	moduleFilePath := filepath.Join(path, "/etc/initramfs-tools/modules")
-	moduleFile, err := os.OpenFile(moduleFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("couldn't open module file: %v", err.Error())
-	}
-	defer moduleFile.Close()
-
-	_, err = moduleFile.WriteString("\nfs-virtiofs\n")
-	if err != nil {
-		return fmt.Errorf("couldn't add virtiofs: %v", err.Error())
+	if err := runWithArchChroot(bl.Paths.RootFS, cmd); err != nil {
+		return errors.Wrapf(err, "failed installing the kernel: %v", line)
 	}
 
-	if err := runInside(path, Command{Name: "update-initramfs", Args: []string{"-c", "-k", "all"}}); err != nil {
-		return fmt.Errorf("couldn't update initramfs: %v", err.Error())
+	if err := editModulesFile(bl.Paths.RootFS); err != nil {
+		return errors.Wrap(err, "failed to edit modules file")
 	}
 
-	// // clean
-	cmds := []Command{
-		{
-			Name: "apt-get",
-			Args: []string{"clean"},
-		},
-		{
-			Name: "cloud-init",
-			Args: []string{"clean"},
-		},
-	}
-	if err := runMultipleInside(path, cmds); err != nil {
-		return fmt.Errorf("couldn't clean: %v", err.Error())
+	if err := updateAndClean(bl.Paths.RootFS); err != nil {
+		return err
 	}
 
-	// // extract kernel
-
-	if err := extractKernel(); err != nil {
-		return fmt.Errorf("error extracting: %v", err.Error())
+	if err := extractKernel(bl.Paths.RootFS, line); err != nil {
+		return errors.Wrap(err, "failed extract the kernel")
 	}
 
 	return nil
 }
 
-func handleEntrypoint(line []string) error {
+func (bl *Builder) handleEntrypoint(line string) error {
+	// TODO: needed for container vm
 	return nil
 }
 
-func handleEnv(line []string) error {
+func (bl *Builder) handleEnv(line string) error {
+	// TODO: needed for container vm
 	return nil
 }

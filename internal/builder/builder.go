@@ -1,50 +1,84 @@
 package builder
 
 import (
-	"fmt"
+	"bufio"
 	"os"
-	"strings"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/pkg/errors"
+
+	"github.com/omarabdul3ziz/flistify/pkg/types"
 )
 
-func Build(params []string) error {
-	var err error
-	filePath := params[0]
+// Builder represents a builder object
+type Builder struct {
+	FlistName string
+	Handlers  map[string]func(string) error
+	Paths     types.Paths
+}
 
-	// TODO: implement reader
-	// TODO: allow multiple lines for the same command
-	zerofileBytes, err := os.ReadFile(filePath)
+// NewBuilder creates a new Builder object with the given flist name
+func NewBuilder(name string) (Builder, error) {
+	bl := Builder{}
+	bl.SetFlistName(name)
+	bl.SetPaths()
+	bl.SetHandlers()
+
+	if err := createDirectoryIfNotExist(bl.Paths.RootFS); err != nil {
+		return Builder{}, errors.Wrap(err, "failed to start the flist")
+	}
+
+	return bl, nil
+}
+
+// SetFlistName sets the flist name for the builder
+func (bl *Builder) SetFlistName(name string) {
+	if name == "" {
+		name = strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	bl.FlistName = name
+}
+
+// SetHundlers sets the handlers for each key
+func (bl *Builder) SetHandlers() {
+	bl.Handlers = map[string]func(string) error{
+		"FROM":       bl.handleFrom,
+		"KERNEL":     bl.handleKernel,
+		"RUN":        bl.handleRun,
+		"ENV":        bl.handleEnv,
+		"ENTRYPOINT": bl.handleEntrypoint,
+	}
+}
+
+// SetPaths sets the paths for the builder
+func (bl *Builder) SetPaths() {
+	bl.Paths.ProjectDir = "/var/lib/flistify"
+	bl.Paths.RootFS = filepath.Join(bl.Paths.ProjectDir, "flists", bl.FlistName)
+	bl.Paths.Boot = filepath.Join(bl.Paths.RootFS, "boot")
+}
+
+// Build executes the build process by reading the commands from the file at the given path
+func (bl *Builder) Build(path string) error {
+	file, err := os.Open(path)
+	// TODO: validate the content of the file
 	if err != nil {
-		return fmt.Errorf("can't read Zerofile: %v", err.Error())
+		return errors.Wrapf(err, "failed to open file %v", path)
 	}
-	lines := strings.Split(string(zerofileBytes), "\n")
+	defer file.Close()
 
-	// TODO: pass flist name from flag or something
-	err = startRootfs(path)
-	if err != nil {
-		return fmt.Errorf("can't start the flist: %v", err.Error())
-	}
-
-	for _, line := range lines {
-		if line == "" || line[0] == '#' {
-			continue
-		}
-
-		content := strings.Split(strings.TrimSpace(line), " ")
-		switch content[0] {
-		case "FROM":
-			err = handleFrom(content[1:])
-		case "KERNEL":
-			err = handleKernel(content[1:])
-		case "RUN":
-			err = handleRun(content[1:])
-		case "ENV":
-			err = handleEnv(content[1:])
-		case "ENTRYPOINT":
-			err = handleEntrypoint(content[1:])
-		default:
-			err = fmt.Errorf("%+v keyword not supported", content[0])
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		// TODO: same command in multiple lines with `\`
+		if err := bl.HandleLine(scanner.Text()); err != nil {
+			return errors.Wrapf(err, "failed to handle line %v", scanner.Text())
 		}
 	}
 
-	return err
+	if err := scanner.Err(); err != nil {
+		return errors.Wrap(err, "scanner encountered an error")
+	}
+
+	return nil
 }

@@ -1,9 +1,12 @@
 package builder
 
-import "path/filepath"
+const (
+	FLISTIFY_ROOT   = "/var/lib/flistify"
+	UBUNTU_ARCHIVE  = "http://archive.ubuntu.com/ubuntu"
+	INITRAMSFS_PATH = "/etc/initramfs-tools/modules"
+	VIRTIOFS        = "fs-virtiofs"
+)
 
 var (
-	currentDir = "/root/oa/flistify"
-	name       = "../playground/container"
-	path       = filepath.Join(currentDir, name)
+	SUPPORTED_DISTROS = []string{"ubuntu"}
 )
